@@ -1,23 +1,30 @@
-# RFC-0001 Flux Multi-Tenancy
+# RFC-0001 Memorandum on Flux Authorisation and Multi-tenancy
 
 ## Summary
 
-This RFC explains the mechanisms available in Flux for implementing multi-tenancy, defines two
-models for multi-tenancy, and gives reference implementations for those models.
+This RFC describes in detail, for [Flux version 0.24][] (Nov 2021),
+
+ - the authorisation model for Flux (how it determines which operations can proceed);
+ - two models for multi-tenancy (safely sharing cluster resources)
+ - reference implementations of the two multi-tenancy models
+
+[Flux version 0.24]: https://github.com/fluxcd/flux2/releases/tag/v0.24.0
 
 ## Motivation
 
-To this point, the Flux project has provided [examples of
-multi-tenancy](https://github.com/fluxcd/flux2-multi-tenancy/tree/v0.1.0), but not explained exactly
-how they relate to Flux's authorisation model. This RFC explains two multi-tenancy implementations,
-their security properties, and how they are implemented within the authorisation model.
+To this point, the Flux project has provided [examples of how to make a multi-tenant
+system](https://github.com/fluxcd/flux2-multi-tenancy/tree/v0.1.0), but not explained exactly how
+they relate to Flux's authorisation model; nor has the authorisation model itself been
+documented. Further work on support for multi-tenancy requires a full account of Flux's
+authorisation model as a baseline. Similarly, it will help to have assumptions about multi-tenancy
+described, for reference.
 
 ### Goals
 
-- Explain the mechanisms available in Flux for supporting multi-tenancy
+- Give a comprehensive account of Flux's authorisation model
 - Define two models for multi-tenancy, "soft multi-tenancy" and "hard multi-tenancy".
 - Explain when each model is appropriate.
-- Describe a reference implementation of each model with Flux.
+- Give a reference implementation of each model with Flux.
 
 ### Non-Goals
 
@@ -25,52 +32,111 @@ their security properties, and how they are implemented within the authorisation
 - Provide an [end-to-end workflow](](https://github.com/fluxcd/flux2-multi-tenancy/tree/v0.1.0)) of
   how to set up multi-tenancy with Flux.
 
-## Introduction
+## Flux's authorisation model
 
-Flux allows different organizations and/or teams to share the same Kubernetes control plane; this is
-referred to as "multi-tenancy". To make this safe, Flux supports segmentation and isolation of
-resources by using namespaces and role-based access control ("RBAC"), and integrating with
-Kubernetes Cluster API.
+The Flux controllers undertake operations as specified by custom resources from the kinds defined in
+the [Flux API][]. Most of the operations are through the Kubernetes API. Authorisation for
+operations on external systems is not accounted for here.
 
-The following subsections explain the existing mechanisms used for safe multi-tenancy.
+Flux defers to [Kubernetes' native RBAC][k8s-rbac] and [namespace isolation][k8s-ns] to determine
+which operations are authorised when processing the custom resources in the Flux API.
 
-### Flux's authorisation model
+This means Kubernetes API operations are constrained by the service account under which each
+controller runs. In the [default deployment of Flux][flux-rbac] these have the [`cluster-admin`
+cluster role][k8s-cluster-admin] bound to them.
 
-Flux defers to Kubernetes' native RBAC to specify which operations are authorised when processing
-the custom resources in the Flux API. By default, this means operations are constrained by the
-service account under which the controllers run, which (again, by default) has the `cluster-admin`
-role bound to it. This is convenient for a deployment in which all users are trusted.
+[Flux API]: https://fluxcd.io/docs/components/
+[flux-rbac]: https://github.com/fluxcd/flux2/tree/v0.24.0/manifests/rbac
+[k8s-ns]: https://kubernetes.io/docs/concepts/overview/working-with-objects/namespaces/
+[k8s-rbac]: https://kubernetes.io/docs/reference/access-authn-authz/rbac/
+[k8s-cluster-admin]: https://kubernetes.io/docs/reference/access-authn-authz/rbac/#user-facing-roles
 
-In a multi-tenant deployment, each tenant needs to be restricted in the operations that can be done
-on their behalf. Since tenants control Flux via its API objects, this becomes a matter of attaching
-RBAC rules to Flux API objects. There are two mechanisms that do this, "impersonation" and "remote
-apply".
-
-#### Impersonation
+### Impersonation
 
 The Kustomize controller and Helm controller both apply arbitrary sets of Kubernetes configuration
-to a cluster. These controllers are subject to authorisation on two counts:
+("_synced configuration_") to a cluster. These controllers use the service account named in the
+field `.spec.serviceAccountName` in the `Kustomization` and `HelmRelease` objects respectively,
+while applying the synced configuration. This mechanism is called "impersonation".
 
- - when accessing Kubernetes resources that are needed for a
-   particular "apply" operation -- for example, a secret referenced in
-   the field `.spec.valuesFrom` in a `HelmRelease`;
- - when creating, updating and deleting Kubernetes resources in the process of applying a piece of
-   configuration.
+The `.spec.serviceAccountName` field is optional. If empty, the controller's service account is
+used.
 
-To give users control over this authorisation, these two controllers will _impersonate_ (assume the
-identity of) a service account mentioned in the apply specification (e.g., [the field
-`.spec.serviceAccountName` in a `Kustomization` object][serviceAccountName]) for both accessing
-resources and applying configuration. This lets a user constrain the operations mentioned above with
-RBAC.
+Aside from creating, updating and deleting resources according to a synced configuration, the
+"apply" step may involve accessing resources referenced by the Flux API object, using the
+impersonated service account if given. All other accesses use the controller's service account.
 
-#### Remote apply
+**`kustomizations.kustomize.toolkit.fluxcd.io/v1beta2`**
+
+Object referenced in `healthChecks` have their status assessed after a synced configuration has been
+applied.
+
+**`helmreleases.helm.toolkit.fluxcd/v2beta1`**
+
+The fields `targetNamespace` and `storageNamespace` can refer to other namespaces, and affect where
+the Helm chart is created or updated, and the record of its deployment is kept. The creation or
+update, and the recording, are done with impersonation.
+
+### Exceptions to namespace isolation
+
+Some Flux API kinds have fields which can refer to objects in another namespace. The Flux
+controllers do not require these to be in the same namespace as the referring object. The following
+are fields that are not restricted to the same namespace, listed by API kind.
+
+**`kustomizations.kustomize.toolkit.fluxcd.io/v1beta2`**
+
+ - `.spec.dependsOn`
+ - `.spec.healthChecks`
+ - `.spec.sourceRef`
+
+These three fields can have references that include a namespace.
+
+**`helmreleases.helm.toolkit.fluxcd/v2beta1`**
+
+ - `.spec.dependsOn`
+ - `.spec.targetNamespace`
+ - `.spec.storageNamespace`
+ - `.spec.chart.spec.sourceRef`
+
+The items in `.spec.dependsOn` can have references that include a namespace.
+
+The fields `targetNamespace` and `storageNamespace` are mentioned here because they may refer to a
+namespace other than the one containing the `HelmRelease` object in question.
+
+ - `.spec.chart.sourceRef`
+
+This field can refer to an object in another namespace. The `.spec.chart` field as a whole gives a
+template for a `HelmChart` object, which is created in the same namespace as the source object.
+
+**`alerts.notification.toolkit.fluxcd.io/v1beta1`**
+
+ - `.spec.eventSources`
+
+Items in this field are references that can include a namespace.
+
+**`receivers.notification.toolkit.fluxcd.io/v1beta1`**
+
+ - `.spec.resources`
+
+Items in this field are references that can include a namespace.
+
+**`imagepolicies.image.toolkit.fluxcd.io/v1beta1`**
+
+ - `.spec.imageRepositoryRef`
+
+This field can include a namespace.
+
+**`imageupdateautomation.image.toolkit.fluxcd.io`**
+
+Note that the field `.spec.sourceRef` does _not_ allow a namespace.
+
+### Remote apply
 
 The Kustomize controller and Helm controller are able to apply a set of configuration to a cluster
-other than the cluster in which they run. If the specification [refers to a secret containing a
-"kubeconfig" file][kubeconfig], the controller will construct a client using that kubeconfig, then
-the client used to apply the specified set of configuration. The effect of this is that the
-configuration will be applied as the user given in the kubeconfig; often this is a user with the
-`cluster-admin` role bound to it, but not necessarily so.
+other than the cluster in which they run. If the `Kustomization` or `HelmRelease` object [refers to
+a secret containing a "kubeconfig" file][kubeconfig], the controller will construct a client using
+that kubeconfig, and the client is used to apply the prepared set of configuration. The effect of
+this is that the configuration will be applied as the user given in the kubeconfig; often this is a
+user with the `cluster-admin` role bound to it, but not necessarily so.
 
 [serviceAccountName]: https://fluxcd.io/docs/components/kustomize/api/#kustomize.toolkit.fluxcd.io/v1beta2.KustomizationSpec
 [kubeconfig]: https://fluxcd.io/docs/components/kustomize/api/#kustomize.toolkit.fluxcd.io/v1beta2.KubeConfig
