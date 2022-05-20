@@ -53,7 +53,7 @@ $(EMBEDDED_MANIFESTS_TARGET): $(call rwildcard,manifests/,*.yaml *.json)
 	touch $@
 
 build: $(EMBEDDED_MANIFESTS_TARGET)
-	CGO_ENABLED=0 go build -ldflags="-s -w -X main.VERSION=$(VERSION)" -o ./bin/flux ./cmd/flux
+	CGO_ENABLED=1 go build -ldflags="-s -w -X main.VERSION=$(VERSION)" -tags 'netgo,osusergo,static_build' -o ./bin/flux ./cmd/flux
 
 .PHONY: install
 install:

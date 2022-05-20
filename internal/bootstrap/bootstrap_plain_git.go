@@ -25,6 +25,7 @@ import (
 	"time"
 
 	gogit "github.com/go-git/go-git/v5"
+	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -46,6 +47,9 @@ import (
 	"github.com/fluxcd/flux2/pkg/manifestgen/sourcesecret"
 	"github.com/fluxcd/flux2/pkg/manifestgen/sync"
 	"github.com/fluxcd/flux2/pkg/status"
+	scgit "github.com/fluxcd/source-controller/pkg/git"
+	"github.com/fluxcd/source-controller/pkg/git/libgit2/managed"
+	"github.com/fluxcd/source-controller/pkg/git/strategy"
 )
 
 type PlainGitBootstrapper struct {
@@ -114,9 +118,28 @@ func (b *PlainGitBootstrapper) ReconcileComponents(ctx context.Context, manifest
 
 		b.logger.Actionf("cloning branch %q from Git repository %q", b.branch, b.url)
 		var cloned bool
+
+		logger := logr.FromContextOrDiscard(ctx)
+		err := managed.InitManagedTransport(logger)
+		if err != nil {
+			return fmt.Errorf("error initing: %w", err)
+		}
 		if err = retry(1, 2*time.Second, func() (err error) {
-			cloned, err = b.git.Clone(ctx, b.url, b.branch, b.caBundle)
-			return
+			strat, _ := strategy.CheckoutStrategyForImplementation(ctx, scgit.Implementation("libgit2"), scgit.CheckoutOptions{
+				Branch: "main",
+			})
+			commit, err := strat.Checkout(ctx, b.git.Path(), b.url, &scgit.AuthOptions{
+				Transport: scgit.TransportType("https"),
+				Username:  "aryan9600",
+				Password:  "",
+				CAFile:    b.caBundle,
+			})
+			if commit != nil {
+				b.logger.Actionf("cloned repo using libgit2")
+				cloned = true
+				return
+			}
+			return fmt.Errorf("error cloning libgit2: %w", err)
 		}); err != nil {
 			return fmt.Errorf("failed to clone repository: %w", err)
 		}
@@ -124,6 +147,8 @@ func (b *PlainGitBootstrapper) ReconcileComponents(ctx context.Context, manifest
 			b.logger.Successf("cloned repository")
 		}
 	}
+	b.logger.Actionf("git repo: %s", b.git.Path())
+	time.Sleep(20 * time.Second)
 
 	// Generate component manifests
 	b.logger.Actionf("generating component manifests")
@@ -199,6 +224,7 @@ func (b *PlainGitBootstrapper) ReconcileSourceSecret(ctx context.Context, option
 	if ok && len(options.CAFilePath+options.PrivateKeyPath+options.Username+options.Password) == 0 {
 		b.logger.Successf("source secret up to date")
 		return nil
+
 	}
 
 	// Generate source secret

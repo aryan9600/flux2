@@ -41,12 +41,6 @@ type GoGit struct {
 	repository *gogit.Repository
 }
 
-type CommitOptions struct {
-	GpgKeyPath       string
-	GpgKeyPassphrase string
-	KeyID            string
-}
-
 func New(path string, auth transport.AuthMethod) *GoGit {
 	return &GoGit{
 		path: path,
